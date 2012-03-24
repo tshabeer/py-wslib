@@ -28,30 +28,42 @@ from random import Random
 from threading import Thread
 
 
+__all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler']
+
+
 STATE_CONNECTING = 0
 STATE_OPEN = 1
 STATE_CLOSING = 2
 STATE_CLOSED = 3
 
-GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
-
-
-class WebSocketException(Exception): pass
-
-class WebSocketSyntaxError(Exception): pass
-
-class WebSocketSecurityError(Exception): pass
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 class BaseWebSocket(object):
     
     _ready_state = STATE_CONNECTING
+    
+    def _send_raw(self, data):
+        self.socket.sendall(str(data))
+    
+    def _send_close_handshake(self):
+        if self._ready_state == STATE_OPEN:
+            pass # TODO
+        else:
+            print "error send_close_handshake"
+    
+    def close(self):
+        self._ready_state = STATE_CLOSING
+        self._send_close_handshake()
+        self.frame_reader.stop()
+        self.socket.close()
+        self._ready_state = STATE_CLOSED
 
 
 class WebSocket(BaseWebSocket):
-    '''WebSocket Connection'''
+    
     header_fields = {}
-
+    
     def __init__(self, url, handler, protocol=None, mask=True):
         self.handshake = ClientHandshake(url)
         print "handshake:", self.handshake
@@ -64,8 +76,8 @@ class WebSocket(BaseWebSocket):
     
     def connect(self):
         self._create_socket()
-        self._send_raw(str(self.handshake)) # FIXME
-        headers = self.read_handshake()
+        self._send_raw(self.handshake)
+        headers = self._read_handshake()
         print headers
         if headers['Sec-WebSocket-Accept'] != self.handshake.key_accept(self.handshake.nonce):
             raise Exception("accept key error")
@@ -74,51 +86,38 @@ class WebSocket(BaseWebSocket):
         self._ready_state = STATE_OPEN
         self.handler.onopen(None)
     
-    def read_handshake(self):
+    def _read_handshake(self):
         handshake = self.socket.recv(4096)
-        print handshake
-        lines = handshake.split('\n')
-        status = lines[0].split()
-        if status[1] != "101":
-            raise Exception("upgrade error")
-        headers = {}
-        for line in lines[1:]:
-            if line.strip() == "":
-                break
-            line = line.strip().split(": ", 1)
-            headers[line[0]] = line[1]
-        print "headers:", headers
-        return headers
+        if handshake:
+            print handshake
+            lines = handshake.split('\n')
+            status = lines[0].split()
+            if status[1] != "101":
+                raise Exception("upgrade error")
+            headers = {}
+            for line in lines[1:]:
+                if line.strip() == "":
+                    break
+                line = line.strip().split(": ", 1)
+                headers[line[0]] = line[1]
+            print "headers:", headers
+            return headers
+        else:
+            raise Exception("handshake failed")
     
     def send(self, message):
         print "sending:", message
         if self._ready_state == STATE_OPEN:
-            self._send_raw(str(TextFrame(message)))
+            self._send_raw(TextFrame(message))
         else:
             print "error: send_text"
     
     def send_binary(self, data):
         print "sending:", data
         if self._ready_state == STATE_OPEN:
-            self._send_raw(str(BinaryFrame(data)))
+            self._send_raw(BinaryFrame(data))
         else:
             print "error: send_binary"
-    
-    def close(self):
-        self._ready_state = STATE_CLOSING
-        self._send_close_handshake()
-        self.frame_reader.stop()
-        self.socket.close()
-        self._ready_state = STATE_CLOSED
-    
-    def _send_close_handshake(self):
-        if self._ready_state == STATE_OPEN:
-            pass # TODO
-        else:
-            print "error send_close_handshake"
-    
-    def _send_raw(self, data):
-        self.socket.sendall(data)
     
     def _create_socket(self):
         urlparse.uses_netloc.append("ws")
@@ -129,9 +128,6 @@ class WebSocket(BaseWebSocket):
             port = 80
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.connect((host, port))
-    
-    def is_alive(self):
-        return True
 
 
 class ServerWebSocket(BaseWebSocket):
@@ -139,18 +135,15 @@ class ServerWebSocket(BaseWebSocket):
     def __init__(self, socket, onmessage):
         print "creating ServerWebSocket instance"
         self.socket = socket
-        handshake = self._read_handshake()
-        print "received handshake:", handshake
-        request, headers = self._parse_handshake(handshake)
+        request, headers = self._read_handshake()
         handshake = ServerHandshake(client_key=headers['Sec-WebSocket-Key'])
-        self.send(handshake)
+        self._send_raw(handshake)
         frame_reader = FrameReader(self.socket, onmessage)
         frame_reader.start()
     
     def _read_handshake(self):
-        return self.socket.recv(4096)
-    
-    def _parse_handshake(self, handshake):
+        handshake = self.socket.recv(4096)
+        print "received handshake:", handshake
         lines = handshake.split('\n')
         request = lines[0].split()
         headers = {}
@@ -163,12 +156,9 @@ class ServerWebSocket(BaseWebSocket):
         if not "Upgrade" in headers and headers['Upgrade'] is not "websocket":
             raise Exception("not upgrade")
         return request[1], headers
-
-    def send(self, data):
-        self.socket.sendall(str(data))
     
-    def close(self):
-        self.socket.close()
+    def send(self, data):
+        self._send_raw(data)
 
 
 class Frame(object):
@@ -196,43 +186,42 @@ class Frame(object):
 
 
 class TextFrame(Frame):
+    
     def __init__(self, message, masking=True):
         Frame.__init__(self, 0x1, message, masking)
 
 
 class BinaryFrame(Frame):
+    
     def __init__(self, data, masking=True):
         Frame.__init__(self, 0x2, data, masking)
 
 
 class CloseFrame(Frame):
+    
     def __init__(self):
         Frame.__init__(self, 0x8, '', False)
 
 
 class PingFrame(Frame):
+    
     def __init__(self):
         Frame.__init__(self, 0x9,'' , False)
 
 
 class PongFrame(Frame):
+    
     def __init__(self):
         Frame.__init__(self, 0xA, '', False)
 
 
 class Handshake(object):
-    '''
-    WebSocket handshake
-    '''
-
+    
     def __init__(self, headers, protocols, extensions):
         self.headers = headers
         self.protocols = protocols
         self.extensions = extensions
     
-    def get_handshake(self):
-        raise NotImplementedError
-
     def key_accept(self, key):
         hash = hashlib.sha1(key + GUID).digest()
         return base64.b64encode(hash)
@@ -250,7 +239,7 @@ class ClientHandshake(Handshake):
         self.resource = url_parts.path
         self.origin = origin
         self.nonce = base64.b64encode(os.urandom(16))
-
+    
     def __repr__(self):
         handshake = "GET " + self.resource + " HTTP/1.1\r\n" + \
                     "Host: " + self.host + "\r\n" + \
@@ -280,7 +269,7 @@ class ServerHandshake(Handshake):
         Handshake.__init__(self, headers, protocols, extensions)
         self.client_key = client_key
         self.client_protocols = client_protocols
-
+    
     def __repr__(self):
         handshake = "HTTP/1.1 101 Switching Protocols\r\n" + \
                     "Upgrade: websocket\r\n" + \
@@ -321,6 +310,7 @@ class FrameReader(Thread):
                     break
                 header, length = struct.unpack("BB", data)
                 opcode = header & 0xf
+                # TODO opcode ok? if not -> disconnect
                 reserved = header & 0x70
                 masked = length & 0x80
                 length = length & 0x7f
@@ -349,16 +339,17 @@ class FrameReader(Thread):
 class WebSocketHandler(object):
     
     def onopen(self, protocol):
-        raise NotImplementedError
-
+        pass
+    
     def onmessage(self, message):
-        raise NotImplementedError
-
+        pass
+    
     def onclose(self):
-        raise NotImplementedError
+        pass
 
 
 class WebSocketServer(object):
+    
     def __init__(self, host, port, handler):
         self.host = host
         self.port = port
@@ -380,6 +371,6 @@ class WebSocketServer(object):
         while True:
             client_socket, client_address = server_socket.accept()
             ServerWebSocket(client_socket, self.handler.onmessage)
-
+    
     def choose_sub_protocol(sub_protocols=None):
         return None
