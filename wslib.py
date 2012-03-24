@@ -171,17 +171,30 @@ class Frame(object):
     def __repr__(self):
         fin = 0x80
         length = len(self.data)
-        frame = struct.pack("B", fin | self.opcode)
+        frame = struct.pack("!B", fin | self.opcode)
         if length < 126:
-            frame += struct.pack("B", length)
+            if self.masking:
+                length = 0x80 | length
+            frame += struct.pack("!B", length)
         elif length <= 65535:
-            frame += struct.pack("!BH", 126, length)
+            len_field = 126
+            if self.masking:
+                len_field = 0x80 | len_field
+            frame += struct.pack("!BH", len_field, length)
         else:
-            frame += struct.pack("!BQ", 127, length)
-        #if self.masking:
-        #   masking_key = 'abcd'
-        #   frame += masking_key
-        frame += self.data
+            len_field = 127
+            if self.masking:
+                len_field = 0x80 | len_field
+            frame += struct.pack("!BQ", len_field, length)
+        if self.masking:
+            masking_key = array.array("B", os.urandom(4))
+            frame += masking_key.tostring()
+            data = array.array("B", self.data)
+            for i in range(len(data)):
+                data[i] = data[i] ^ masking_key[i % 4]
+            frame += data.tostring()
+        else:
+            frame += self.data
         return frame
 
 
@@ -308,7 +321,7 @@ class FrameReader(Thread):
                 if data == '':
                     print "connection lost"
                     break
-                header, length = struct.unpack("BB", data)
+                header, length = struct.unpack("!BB", data)
                 opcode = header & 0xf
                 # TODO opcode ok? if not -> disconnect
                 reserved = header & 0x70
@@ -322,13 +335,17 @@ class FrameReader(Thread):
                 elif length == 127:
                     data = self.socket.recv(8)
                     payload_length = struct.unpack("!Q", data)[0]
-                
-                #data = self.socket.recv(4)
-                #mask = struct.unpack("B", data)
-                
+                if masked:
+                    data = self.socket.recv(4)
+                    masking_key = struct.unpack("!BBBB", data)
                 data = self.socket.recv(payload_length)
-                print data
-                self.onmessage(data)
+                if masked:
+                    data = array.array("B", data)
+                    for i in range(len(data)):
+                        data[i] = data[i] ^ masking_key[i % 4]
+                    self.onmessage(data.tostring())
+                else:
+                    self.onmessage(data)
         print "FrameReader: stopped"
     
     def stop(self):
@@ -361,7 +378,7 @@ class WebSocketServer(object):
             client.accept(sub_protocol)
         else:
             client.disconnect()
-
+    
     def serve_forever(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
