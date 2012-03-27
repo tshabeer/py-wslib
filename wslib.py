@@ -156,17 +156,26 @@ class ServerWebSocket(BaseWebSocket):
         BaseWebSocket.__init__(self, handler, mask)
         print "creating ServerWebSocket instance"
         self.socket = socket
-        request, headers = self._read_handshake()
-        handshake = ServerHandshake(client_key=headers['Sec-WebSocket-Key'])
+        self.request_query, self.request_headers = self._read_handshake()
+        request = _ServerRequest(self.request_query, self.request_headers,
+                                 self._accept, self._reject)
+        self.handler.onrequest(request)
+    
+    def _accept(self):
+        handshake = ServerHandshake(client_key=self.request_headers['Sec-WebSocket-Key'])
         self._send_raw(handshake)
-        self._frame_reader = FrameReader(self.socket, handler.onmessage)
+        self._frame_reader = FrameReader(self.socket, self.handler.onmessage)
         self._frame_reader.start()
+    
+    def _reject(self):
+        self.socket.close()
+        print "rejected request"
     
     def _read_handshake(self):
         handshake = self.socket.recv(4096)
         print "received handshake:", handshake
         lines = handshake.split('\n')
-        request = lines[0].split()
+        query = lines[0].split()
         headers = {}
         for line in lines[1:]:
             if line.strip() == "":
@@ -176,10 +185,25 @@ class ServerWebSocket(BaseWebSocket):
         print "headers:", headers
         if not "Upgrade" in headers and headers['Upgrade'] is not "websocket":
             raise WebSocketError("not upgrade")
-        return request[1], headers
+        return query[1], headers
     
     def send(self, data):
         self._send_raw(data)
+
+
+class _ServerRequest(object):
+    
+    def __init__(self, query, headers, accept, reject):
+        self.query = query
+        self.headers = headers
+        self.accept = accept
+        self.reject = reject
+    
+    def accept(self):
+        self.accept()
+    
+    def reject(self):
+        self.reject()
 
 
 class Handshake(object):
@@ -405,6 +429,9 @@ class WebSocketServer(object):
 
 
 class WebSocketHandler(object):
+    
+    def onrequest(self, request):
+        request.accept()
     
     def onopen(self, protocol):
         pass
