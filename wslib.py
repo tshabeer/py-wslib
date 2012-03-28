@@ -31,12 +31,12 @@ from threading import Thread
 __all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler']
 
 
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
 STATE_CONNECTING = 0
 STATE_OPEN = 1
 STATE_CLOSING = 2
 STATE_CLOSED = 3
-
-GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 OPCODE_TEXT = 0x1
 OPCODE_BINARY = 0x2
@@ -69,8 +69,6 @@ class BaseWebSocket(object):
         if self._ready_state == STATE_OPEN:
             self._ready_state = STATE_CLOSING
             # TODO
-        else:
-            print "error send_close_handshake"
     
     def close(self):
         if self._ready_state > STATE_CONNECTING:
@@ -91,7 +89,7 @@ class WebSocket(BaseWebSocket):
         print "handshake:", self.handshake
         self.url = url
     
-    def add_header_field(self, key, value):
+    def add_header(self, key, value):
         self.header_fields[key.strip()] = value.strip()
     
     def connect(self):
@@ -156,13 +154,14 @@ class ServerWebSocket(BaseWebSocket):
         BaseWebSocket.__init__(self, handler, mask)
         print "creating ServerWebSocket instance"
         self.socket = socket
-        self.request_query, self.request_headers = self._read_handshake()
-        request = _ServerRequest(self.request_query, self.request_headers,
-                                 self._accept, self._reject)
+        self.query, self.key, self.request_protocols, self.request_headers = self._read_handshake()
+        request = _ServerRequest(self.query, self.request_protocols,
+                                 self.request_headers, self._accept,
+                                 self._reject)
         self.handler.onrequest(request)
     
-    def _accept(self):
-        handshake = ServerHandshake(client_key=self.request_headers['Sec-WebSocket-Key'])
+    def _accept(self, protocol=None):
+        handshake = ServerHandshake(self.key, protocol)
         self._send_raw(handshake)
         self._frame_reader = FrameReader(self.socket, self.handler.onmessage)
         self._frame_reader.start()
@@ -185,7 +184,16 @@ class ServerWebSocket(BaseWebSocket):
         print "headers:", headers
         if not "Upgrade" in headers and headers['Upgrade'] is not "websocket":
             raise WebSocketError("not upgrade")
-        return query[1], headers
+        protocols = []
+        if "Sec-WebSocket-Protocol" in headers:
+            protocol_str = headers['Sec-WebSocket-Protocol']
+            del headers['Sec-WebSocket-Protocol']
+        if "Sec-WebSocket-Key" in headers:
+            key = headers['Sec-WebSocket-Key']
+            del headers['Sec-WebSocket-Key']
+        else:
+            raise WebSocketError("client key missing")
+        return query[1], key, protocols, headers
     
     def send(self, data):
         self._send_raw(data)
@@ -193,13 +201,14 @@ class ServerWebSocket(BaseWebSocket):
 
 class _ServerRequest(object):
     
-    def __init__(self, query, headers, accept, reject):
+    def __init__(self, query, protocols, headers, accept, reject):
         self.query = query
+        self.protocols = protocols
         self.headers = headers
         self.accept = accept
         self.reject = reject
     
-    def accept(self):
+    def accept(self, protocol=None):
         self.accept()
     
     def reject(self):
@@ -208,9 +217,8 @@ class _ServerRequest(object):
 
 class Handshake(object):
     
-    def __init__(self, headers, protocols, extensions):
+    def __init__(self, headers, extensions):
         self.headers = headers
-        self.protocols = protocols
         self.extensions = extensions
     
     def key_accept(self, key):
@@ -221,7 +229,8 @@ class Handshake(object):
 class ClientHandshake(Handshake):
     
     def __init__(self, url, headers={}, protocols={}, extensions={}, origin=None):
-        Handshake.__init__(self, headers, protocols, extensions)
+        Handshake.__init__(self, headers, extensions)
+        self.protocols = protocols
         urlparse.uses_netloc.append("ws")
         url_parts = urlparse.urlparse(url)
         self.host = url_parts.hostname
@@ -256,25 +265,20 @@ class ClientHandshake(Handshake):
 
 class ServerHandshake(Handshake):
     
-    def __init__(self, client_key=None, client_protocols={}, headers={}, protocols={}, extensions={}):
-        Handshake.__init__(self, headers, protocols, extensions)
+    def __init__(self, client_key, protocol, headers={}, extensions={}):
+        Handshake.__init__(self, headers, extensions)
         self.client_key = client_key
-        self.client_protocols = client_protocols
+        self.protocol = protocol
     
     def __repr__(self):
         handshake = "HTTP/1.1 101 Switching Protocols\r\n" + \
                     "Upgrade: websocket\r\n" + \
                     "Connection: Upgrade\r\n" + \
                     "Sec-WebSocket-Accept: " + self.key_accept(self.client_key) + "\r\n"
-        sub_protocol = self.get_sub_protocol()
-        if sub_protocol:
-            handshake += "Sec-WebSocket-Protocol: " + self.get_sub_protocol() + "\r\n"
+        if self.protocol:
+            handshake += "Sec-WebSocket-Protocol: " + self.protocol + "\r\n"
         handshake += "\r\n"
         return handshake
-    
-    def get_sub_protocol(self):
-        """Choose preferred sub protocol"""
-        return None
 
 
 class Frame(object):
@@ -407,25 +411,14 @@ class WebSocketServer(object):
         self.handler = handler
         self.origins = origins
     
-    def onconnect(self, client):
-        sub_protocol = self.choose_sub_protocol(client.sub_protocols)
-        if sub_protocol:
-            client.accept(sub_protocol)
-        else:
-            client.disconnect()
-    
     def serve_forever(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
-        #server_socket.setblocking(0)
         server_socket.bind(('', self.port))
         server_socket.listen(128)
         while True:
             client_socket, client_address = server_socket.accept()
             ServerWebSocket(client_socket, self.handler)
-    
-    def choose_sub_protocol(sub_protocols=None):
-        return None
 
 
 class WebSocketHandler(object):
