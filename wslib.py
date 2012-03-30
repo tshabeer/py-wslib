@@ -28,7 +28,8 @@ from random import Random
 from threading import Thread
 
 
-__all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler']
+__all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler',
+           'WebSocketRequestHandler']
 
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -56,27 +57,61 @@ class WebSocketError(Exception): pass
 class BaseWebSocket(object):
     
     _ready_state = STATE_CONNECTING
+    _socket = None
     _frame_reader = None
     
     def __init__(self, handler, mask):
         self.handler = handler
+        self.handler.websocket = self
         self.mask = mask
     
     def _send_raw(self, data):
-        self.socket.sendall(str(data))
+        self._socket.sendall(str(data))
+    
+    def _send_ping(self):
+        if self.is_open():
+            self._send_raw(PingFrame())
+    
+    def _send_pong(self):
+        if self.is_open():
+            self._send_raw(PongFrame())
     
     def _send_close_handshake(self):
-        if self._ready_state == STATE_OPEN:
-            self._ready_state = STATE_CLOSING
-            # TODO
+        self._send_raw(CloseFrame())
+    
+    def set_open(self):
+        self._socket.setblocking(0)
+        self._frame_reader = FrameReader(self)
+        self._frame_reader.start()
+        self._ready_state = STATE_OPEN
+    
+    def is_open(self):
+        return self._ready_state == STATE_OPEN
+    
+    def is_closing(self):
+        return self._ready_state == STATE_CLOSING
+    
+    def is_closed(self):
+        return self._ready_state == STATE_CLOSED
+    
+    def ready(self):
+        ready = select.select([self._socket], [], [], 1)
+        if ready[0]:
+            return True
+        else:
+            return False
+    
+    def read(self, size):
+        return self._socket.recv(size)
     
     def close(self):
-        if self._ready_state > STATE_CONNECTING:
+        if self.is_open():
             self._ready_state = STATE_CLOSING
             self._send_close_handshake()
+        elif self.is_closing():
+            self._ready_state = STATE_CLOSED
             self._frame_reader.stop()
-            self.socket.close()
-        self._ready_state = STATE_CLOSED
+            self._socket.close()
 
 
 class WebSocket(BaseWebSocket):
@@ -85,8 +120,6 @@ class WebSocket(BaseWebSocket):
     
     def __init__(self, url, handler, protocol=None, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
-        self.handshake = ClientHandshake(url)
-        print "handshake:", self.handshake
         self.url = url
     
     def add_header(self, key, value):
@@ -94,18 +127,19 @@ class WebSocket(BaseWebSocket):
     
     def connect(self):
         self._create_socket()
-        self._send_raw(self.handshake)
+        handshake = ClientHandshake(self.url)
+        print "handshake:", handshake
+        self._send_raw(handshake)
         headers = self._read_handshake()
         print headers
-        if headers['Sec-WebSocket-Accept'] != self.handshake.key_accept(self.handshake.nonce):
-            raise Exception("accept key error")
-        self._frame_reader = FrameReader(self.socket, self.handler.onmessage)
-        self._frame_reader.start()
-        self._ready_state = STATE_OPEN
+        if headers['Sec-WebSocket-Accept'] != handshake.key_accept(handshake.nonce):
+            self.websocket.close()
+            raise WebSocketError("Sec-WebSocket-Key does not match with Sec-WebSocket-Accept")
+        self.set_open()
         self.handler.onopen(None)
     
     def _read_handshake(self):
-        handshake = self.socket.recv(4096)
+        handshake = self.read(4096)
         if handshake:
             print handshake
             lines = handshake.split('\n')
@@ -124,15 +158,13 @@ class WebSocket(BaseWebSocket):
             raise WebSocketError("handshake failed")
     
     def send(self, message):
-        print "sending:", message
-        if self._ready_state == STATE_OPEN:
+        if self.is_open():
             self._send_raw(TextFrame(message))
         else:
             print "error: send_text"
     
     def send_binary(self, data):
-        print "sending:", data
-        if self._ready_state == STATE_OPEN:
+        if self.is_open():
             self._send_raw(BinaryFrame(data))
         else:
             print "error: send_binary"
@@ -144,16 +176,15 @@ class WebSocket(BaseWebSocket):
         port = urlparts.port
         if not port:
             port = 80
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((host, port))
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.connect((host, port))
 
 
 class ServerWebSocket(BaseWebSocket):
     
     def __init__(self, socket, handler, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
-        print "creating ServerWebSocket instance"
-        self.socket = socket
+        self._socket = socket
         self.query, self.key, self.request_protocols, self.request_headers = self._read_handshake()
         request = _ServerRequest(self.query, self.request_protocols,
                                  self.request_headers, self._accept,
@@ -163,15 +194,15 @@ class ServerWebSocket(BaseWebSocket):
     def _accept(self, protocol=None):
         handshake = ServerHandshake(self.key, protocol)
         self._send_raw(handshake)
-        self._frame_reader = FrameReader(self.socket, self.handler.onmessage)
-        self._frame_reader.start()
+        self.set_open()
     
-    def _reject(self):
-        self.socket.close()
-        print "rejected request"
+    def _reject(self, code=404, message="Not Found"):
+        self._send_raw("HTTP/1.1 %s %s\r\n\r\n" % (code, message))
+        self._socket.close()
+        self._ready_state = STATE_CLOSED
     
     def _read_handshake(self):
-        handshake = self.socket.recv(4096)
+        handshake = self.read(4096)
         print "received handshake:", handshake
         lines = handshake.split('\n')
         query = lines[0].split()
@@ -350,52 +381,60 @@ class PongFrame(Frame):
 
 class FrameReader(Thread):
     
-    def __init__(self, socket, onmessage):
+    def __init__(self, websocket):
         Thread.__init__(self)
-        self.socket = socket
-        self.onmessage = onmessage
+        self.websocket = websocket
         self.running = True
     
     def run(self):
-        self.socket.setblocking(0)
         while self.running:
             try:
-                ready = select.select([self.socket], [], [], 1)
+                if self.websocket.ready():
+                    data = self.websocket.read(2)
+                    if data == '':
+                        print "connection lost" # TODO
+                        break
+                    header, length = struct.unpack("!BB", data)
+                    opcode = header & 0xf
+                    if not opcode in OPCODES:
+                        raise WebSocketError("unknown or unsupported opcode")
+                    if opcode == OPCODE_PING:
+                        self.websocket._send_pong()
+                        continue
+                    elif opcode == OPCODE_PONG:
+                        # TODO
+                        continue
+                    elif opcode == OPCODE_CLOSE:
+                        if self.websocket.is_open():
+                            self.websocket._send_close_handshake()
+                        else:
+                            self.websocket.close()
+                            break
+                    reserved = header & 0x70
+                    masked = length & 0x80
+                    length = length & 0x7f
+                    if length < 126:
+                        payload_length = length
+                    elif length == 126:
+                        data = self.websocket.read(2)
+                        payload_length = struct.unpack("!H", data)[0]
+                    elif length == 127:
+                        data = self.websocket.read(8)
+                        payload_length = struct.unpack("!Q", data)[0]
+                    if masked:
+                        data = self.websocket.read(4)
+                        masking_key = struct.unpack("!BBBB", data)
+                    data = self.websocket.read(payload_length)
+                    if masked:
+                        data = array.array("B", data)
+                        for i in range(len(data)):
+                            data[i] = data[i] ^ masking_key[i % 4]
+                        self.websocket.handler.onmessage(data.tostring())
+                    else:
+                        self.websocket.handler.onmessage(data)
             except:
-                print "socket closed, stopping FrameReader"
                 break
-            if ready[0]:
-                data = self.socket.recv(2)
-                print "data", data
-                if data == '':
-                    print "connection lost"
-                    break
-                header, length = struct.unpack("!BB", data)
-                opcode = header & 0xf
-                if not opcode in OPCODES:
-                    raise WebSocketError("unknown or unsupported opcode")
-                reserved = header & 0x70
-                masked = length & 0x80
-                length = length & 0x7f
-                if length < 126:
-                    payload_length = length
-                elif length == 126:
-                    data = self.socket.recv(2)
-                    payload_length = struct.unpack("!H", data)[0]
-                elif length == 127:
-                    data = self.socket.recv(8)
-                    payload_length = struct.unpack("!Q", data)[0]
-                if masked:
-                    data = self.socket.recv(4)
-                    masking_key = struct.unpack("!BBBB", data)
-                data = self.socket.recv(payload_length)
-                if masked:
-                    data = array.array("B", data)
-                    for i in range(len(data)):
-                        data[i] = data[i] ^ masking_key[i % 4]
-                    self.onmessage(data.tostring())
-                else:
-                    self.onmessage(data)
+        self.websocket.close()
         print "FrameReader: stopped"
     
     def stop(self):
@@ -423,8 +462,7 @@ class WebSocketServer(object):
 
 class WebSocketHandler(object):
     
-    def onrequest(self, request):
-        request.accept()
+    websocket = None
     
     def onopen(self, protocol):
         pass
@@ -434,3 +472,9 @@ class WebSocketHandler(object):
     
     def onclose(self):
         pass
+
+
+class WebSocketRequestHandler(WebSocketHandler):
+    
+    def onrequest(self, request):
+        request.accept()
