@@ -56,6 +56,10 @@ class WebSocketError(Exception): pass
 
 class WebSocketHandshakeError(Exception): pass
 
+class WebSocketProtocolError(Exception): pass
+
+class WebSocketClosedError(Exception): pass
+
 
 class BaseWebSocket(object):
     
@@ -82,8 +86,11 @@ class BaseWebSocket(object):
         return self._ready_state == STATE_CLOSING
     
     def ready(self):
-        ready = select.select([self._socket], [], [], 1)
-        return True if ready[0] else False
+        try:
+            ready = select.select([self._socket], [], [], 1)
+            return True if ready[0] else False
+        except:
+            raise WebSocketClosedError("socket closed")
     
     def read(self, size):
         return self._socket.recv(size)
@@ -95,20 +102,20 @@ class BaseWebSocket(object):
         if self.is_open():
             self._send_raw(TextFrame(message))
         else:
-            raise WebSocketError("can't send message: connection not open")
+            raise WebSocketClosedError("can't send message: connection not open")
     
     def send_binary(self, data):
         if self.is_open():
             self._send_raw(BinaryFrame(data))
         else:
-            raise WebSocketError("can't send message: connection not open")
+            raise WebSocketClosedError("can't send message: connection not open")
     
     def send_ping(self):
         if self.is_open():
             self._send_raw(PingFrame())
             self._last_ping = time.time()
         else:
-            raise WebSocketError("can't send ping: connection not open")
+            raise WebSocketClosedError("can't send ping: connection not open")
     
     def _send_pong(self):
         self._send_raw(PongFrame())
@@ -144,7 +151,7 @@ class WebSocket(BaseWebSocket):
         self.server_headers = self._read_handshake()
         if self.server_headers['Sec-WebSocket-Accept'] != handshake.key_accept(handshake.nonce):
             self.websocket.close()
-            raise WebSocketError("Sec-WebSocket-Key does not match with Sec-WebSocket-Accept")
+            raise WebSocketHandshakeError("Sec-WebSocket-Key does not match with Sec-WebSocket-Accept")
         self.set_open()
         self.handler.onopen(None)
     
@@ -154,7 +161,7 @@ class WebSocket(BaseWebSocket):
             lines = handshake.split('\n')
             status = lines[0].split()
             if status[1] != "101":
-                raise Exception("upgrade error")
+                raise WebSocketHandshakeError("upgrade failed")
             headers = {}
             for line in lines[1:]:
                 if line.strip() == "":
@@ -163,7 +170,7 @@ class WebSocket(BaseWebSocket):
                 headers[line[0]] = line[1]
             return headers
         else:
-            raise WebSocketError("handshake failed")
+            raise WebSocketHandshakeError("handshake failed")
     
     def _create_socket(self):
         urlparse.uses_netloc.append("ws")
@@ -278,11 +285,9 @@ class ClientHandshake(Handshake):
             "Origin:" + self.origin + "\r\n"
         if self.protocols:
             if type(self.protocols) is list:
-                handshake += "Sec-WebSocket-Protocol: %s\r\n" % ', '.join(self.protocols)
+                handshake += "Sec-WebSocket-Protocol: %s\r\n" % ', '.join(filter(None, self.protocols))
             else:
                 handshake += "Sec-WebSocket-Protocol: %s\r\n" % self.protocols.strip()
-        if self.extensions:
-            pass # TODO
         if self.headers:
             for key in self.headers:
                 handshake += "%s: %s\r\n" % (key, self.headers[key].strip())
@@ -394,7 +399,7 @@ class FrameReader(Thread):
                     header, length = struct.unpack("!BB", data)
                     opcode = header & 0xf
                     if not opcode in OPCODES:
-                        raise WebSocketError("unknown or unsupported opcode")
+                        raise WebSocketProtocolError("unknown opcode")
                     if opcode == OPCODE_PING:
                         self.websocket._send_pong()
                         continue
