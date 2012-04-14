@@ -25,6 +25,7 @@ import struct
 import array
 import select
 import time
+import ssl
 from random import Random
 from threading import Thread
 
@@ -33,7 +34,13 @@ __all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler',
            'WebSocketRequestHandler']
 
 
-GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+urlparse.uses_netloc.append('ws')
+urlparse.uses_netloc.append('wss')
+
+
+WEBSOCKET_VERSION = 13
+
+GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
 STATE_CONNECTING = 0
 STATE_OPEN = 1
@@ -65,6 +72,7 @@ class BaseWebSocket(object):
     
     _ready_state = STATE_CONNECTING
     _socket = None
+    _secure = False
     _frame_reader = None
     _last_ping = 0
     
@@ -73,7 +81,7 @@ class BaseWebSocket(object):
         self.handler.websocket = self
         self.mask = mask
     
-    def set_open(self):
+    def _set_open(self):
         self._socket.setblocking(0)
         self._frame_reader = FrameReader(self)
         self._frame_reader.start()
@@ -152,7 +160,7 @@ class WebSocket(BaseWebSocket):
         if self.server_headers['Sec-WebSocket-Accept'] != handshake.key_accept(handshake.nonce):
             self.websocket.close()
             raise WebSocketHandshakeError("Sec-WebSocket-Key does not match with Sec-WebSocket-Accept")
-        self.set_open()
+        self._set_open()
         self.handler.onopen(None)
     
     def _read_handshake(self):
@@ -160,7 +168,7 @@ class WebSocket(BaseWebSocket):
         if handshake:
             lines = handshake.split('\n')
             status = lines[0].split()
-            if status[1] != "101":
+            if status[1] != '101':
                 raise WebSocketHandshakeError("upgrade failed")
             headers = {}
             for line in lines[1:]:
@@ -173,19 +181,24 @@ class WebSocket(BaseWebSocket):
             raise WebSocketHandshakeError("handshake failed")
     
     def _create_socket(self):
-        urlparse.uses_netloc.append("ws")
         urlparts = urlparse.urlparse(self.url)
-        host = urlparts.hostname
+        if urlparts.scheme == 'ws':
+            default_port = 80
+        elif urlparts.scheme == 'wss':
+            default_port = 443
+            self._secure = True
+        else:
+            raise WebSocketError("invalid url")
         port = urlparts.port
         if not port:
-            port = 80
+            port = default_port
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.connect((host, port))
+        self._socket.connect((urlparts.hostname, port))
 
 
 class ServerWebSocket(BaseWebSocket):
     
-    def __init__(self, socket, handler, mask=True):
+    def __init__(self, socket, handler, secure, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
         self._socket = socket
         try:
@@ -201,10 +214,15 @@ class ServerWebSocket(BaseWebSocket):
     def _accept(self, protocol=None):
         handshake = ServerHandshake(self.key, protocol)
         self._send_raw(handshake)
-        self.set_open()
+        self._set_open()
     
-    def _reject(self, code=404, message="Not Found"):
-        self._send_raw("HTTP/1.1 %s %s\r\n\r\n" % (code, message))
+    def _reject(self, code=404, message="Not Found", headers=None):
+        data = "HTTP/1.1 %s %s\r\n" % (code, message)
+        if headers:
+            for (header, value) in headers:
+                data += "%s: %s\r\n" % (header, value)
+        data += "\r\n"
+        self._send_raw(data)
         self._socket.close()
         self._ready_state = STATE_CLOSED
     
@@ -219,19 +237,24 @@ class ServerWebSocket(BaseWebSocket):
             line = line.strip().split(": ", 1)
             self.request_headers[line[0]] = line[1]
         if (not "Upgrade" in self.request_headers
-        and self.request_headers['Upgrade'] is not "websocket"):
+        and self.request_headers['Upgrade'] is not 'websocket'):
+            # TODO reject
             raise WebSocketHandshakeError("upgrade header missing")
         self.request_protocols = []
-        if "Sec-WebSocket-Protocol" in self.request_headers:
+        if 'Sec-WebSocket-Protocol' in self.request_headers:
             protocol_str = headers['Sec-WebSocket-Protocol']
             del self.request_headers['Sec-WebSocket-Protocol']
             for protocol in filter(None, protocol_str.split(",")):
                 self.request_protocols.append(protocol.strip())
-        if "Sec-WebSocket-Key" in self.request_headers:
+        if 'Sec-WebSocket-Key' in self.request_headers:
             self.key = self.request_headers['Sec-WebSocket-Key']
             del self.request_headers['Sec-WebSocket-Key']
         else:
             raise WebSocketHandshakeError("client key missing")
+        if 'Sec-WebSocket-Version' in self.request_headers:
+            if self.request_headers['Sec-WebSocket-Version'] != WEBSOCKET_VERSION:
+                # TODO reject
+                raise WebSocketHandshakeError("wrong protocol version")
 
 
 class _Request(object):
@@ -266,7 +289,6 @@ class ClientHandshake(Handshake):
     def __init__(self, url, headers={}, protocols={}, extensions={}, origin=None):
         Handshake.__init__(self, headers, extensions)
         self.protocols = protocols
-        urlparse.uses_netloc.append("ws")
         url_parts = urlparse.urlparse(url)
         self.host = url_parts.hostname
         self.port = url_parts.port
@@ -442,10 +464,11 @@ class FrameReader(Thread):
 
 class WebSocketServer(object):
     
-    def __init__(self, host, port, handler, origins=[]):
+    def __init__(self, host, port, handler, secure=False, origins=[]):
         self.host = host
         self.port = port
         self.handler = handler
+        self.secure = secure
         self.origins = origins
     
     def serve_forever(self):
@@ -455,7 +478,7 @@ class WebSocketServer(object):
         server_socket.listen(128)
         while True:
             client_socket, client_address = server_socket.accept()
-            ServerWebSocket(client_socket, self.handler)
+            ServerWebSocket(client_socket, self.handler, self.secure)
 
 
 class WebSocketHandler(object):
