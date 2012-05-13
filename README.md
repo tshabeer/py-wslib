@@ -30,9 +30,9 @@
 
 
 ### Server
-    from wslib import WebSocketServer, WebSocketRequestHandler
+    from wslib import WebSocketServer, WebSocketHandler
     
-    class EchoHandler(WebSocketRequestHandler):
+    class EchoHandler(WebSocketHandler):
         
         def onrequest(self, request):
             print "received request"
