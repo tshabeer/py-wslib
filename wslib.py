@@ -1,6 +1,6 @@
 # -*- coding: utf8 -*-
 """
-Copyright (C) 2012 Roderick Baier <roderick.baier@gmail.com>
+Copyright (C) 2012 Roderick Baier
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,18 +20,15 @@ import socket
 import urlparse
 import hashlib
 import base64
-import ctypes
 import struct
 import array
 import select
 import time
-import ssl
 from random import Random
 from threading import Thread
 
 
-__all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler',
-           'WebSocketRequestHandler']
+__all__ = ['WebSocket', 'WebSocketServer', 'WebSocketHandler']
 
 
 urlparse.uses_netloc.append('ws')
@@ -139,6 +136,7 @@ class BaseWebSocket(object):
             self._ready_state = STATE_CLOSED
             self._frame_reader.stop()
             self._socket.close()
+            self.handler.onclose()
 
 
 class WebSocket(BaseWebSocket):
@@ -416,7 +414,6 @@ class FrameReader(Thread):
                 if self.websocket.ready():
                     data = self.websocket.read(2)
                     if data == '':
-                        print "connection lost" # TODO
                         break
                     header, length = struct.unpack("!BB", data)
                     opcode = header & 0xf
@@ -426,8 +423,7 @@ class FrameReader(Thread):
                         self.websocket._send_pong()
                         continue
                     elif opcode == OPCODE_PONG:
-                        print "received pong after %s seconds" % \
-                              (time.time() - self.websocket._last_ping) # TODO
+                        self.websocket.handler.onpong(time.time() - self.websocket._last_ping)
                         continue
                     elif opcode == OPCODE_CLOSE:
                         self.websocket.close()
@@ -485,17 +481,26 @@ class WebSocketHandler(object):
     
     websocket = None
     
+    def onrequest(self, request):
+        request.accept()
+    
     def onopen(self, protocol):
         pass
     
     def onmessage(self, message):
         pass
     
+    def onpong(self, duration):
+        print "received pong after %s seconds" % duration
+    
     def onclose(self):
         pass
-
-
-class WebSocketRequestHandler(WebSocketHandler):
     
-    def onrequest(self, request):
-        request.accept()
+    def send(self, message):
+        self.websocket.send(message)
+    
+    def send_binary(self, data):
+        self.websocket.send_binary(data)
+    
+    def ping(self):
+        self.websocket.send_ping()
