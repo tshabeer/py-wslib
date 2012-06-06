@@ -95,7 +95,7 @@ class BaseWebSocket(object):
             ready = select.select([self._socket], [], [], 1)
             return True if ready[0] else False
         except:
-            raise WebSocketClosedError("socket closed")
+            raise WebSocketClosedError("Socket closed")
     
     def read(self, size):
         return self._socket.recv(size)
@@ -107,20 +107,20 @@ class BaseWebSocket(object):
         if self.is_open():
             self._send_raw(TextFrame(message))
         else:
-            raise WebSocketClosedError("can't send message: connection not open")
+            raise WebSocketClosedError("Can't send message: connection not open")
     
     def send_binary(self, data):
         if self.is_open():
             self._send_raw(BinaryFrame(data))
         else:
-            raise WebSocketClosedError("can't send message: connection not open")
+            raise WebSocketClosedError("Can't send message: connection not open")
     
     def send_ping(self):
         if self.is_open():
             self._send_raw(PingFrame())
             self._last_ping = time.time()
         else:
-            raise WebSocketClosedError("can't send ping: connection not open")
+            raise WebSocketClosedError("Can't send ping: connection not open")
     
     def _send_pong(self):
         self._send_raw(PongFrame())
@@ -167,7 +167,7 @@ class WebSocket(BaseWebSocket):
             lines = handshake.split('\n')
             status = lines[0].split()
             if status[1] != '101':
-                raise WebSocketHandshakeError("upgrade failed")
+                raise WebSocketHandshakeError("Upgrade failed: %s" % " ".join(status[1:]))
             headers = {}
             for line in lines[1:]:
                 if line.strip() == "":
@@ -176,7 +176,7 @@ class WebSocket(BaseWebSocket):
                 headers[line[0]] = line[1]
             return headers
         else:
-            raise WebSocketHandshakeError("handshake failed")
+            raise WebSocketHandshakeError("Handshake failed")
     
     def _create_socket(self):
         urlparts = urlparse.urlparse(self.url)
@@ -186,7 +186,7 @@ class WebSocket(BaseWebSocket):
             default_port = 443
             self._secure = True
         else:
-            raise WebSocketError("invalid url")
+            raise WebSocketError("Invalid URL")
         port = urlparts.port
         if not port:
             port = default_port
@@ -234,10 +234,9 @@ class ServerWebSocket(BaseWebSocket):
                 break
             line = line.strip().split(": ", 1)
             self.request_headers[line[0]] = line[1]
-        if (not "Upgrade" in self.request_headers
-        and self.request_headers['Upgrade'] is not 'websocket'):
-            # TODO reject
-            raise WebSocketHandshakeError("upgrade header missing")
+        if 'Upgrade' not in self.request_headers \
+        or self.request_headers['Upgrade'] != 'websocket':
+            raise WebSocketHandshakeError("Missing or unsupported upgrade header")
         self.request_protocols = []
         if 'Sec-WebSocket-Protocol' in self.request_headers:
             protocol_str = headers['Sec-WebSocket-Protocol']
@@ -251,8 +250,7 @@ class ServerWebSocket(BaseWebSocket):
             raise WebSocketHandshakeError("client key missing")
         if 'Sec-WebSocket-Version' in self.request_headers:
             if self.request_headers['Sec-WebSocket-Version'] != WEBSOCKET_VERSION:
-                # TODO reject
-                raise WebSocketHandshakeError("wrong protocol version")
+                raise WebSocketHandshakeError("Unsupported protocol version")
 
 
 class _Request(object):
@@ -302,10 +300,10 @@ class ClientHandshake(Handshake):
                     "Connection: Upgrade\r\n" + \
                     "Sec-WebSocket-Key: " + self.nonce + "\r\n"
         if self.origin:
-            "Origin:" + self.origin + "\r\n"
+            handshake += "Origin: %s\r\n" % self.origin
         if self.protocols:
             if type(self.protocols) is list:
-                handshake += "Sec-WebSocket-Protocol: %s\r\n" % ', '.join(filter(None, self.protocols))
+                handshake += "Sec-WebSocket-Protocol: %s\r\n" % ", ".join(filter(None, self.protocols))
             else:
                 handshake += "Sec-WebSocket-Protocol: %s\r\n" % self.protocols.strip()
         if self.headers:
@@ -329,7 +327,7 @@ class ServerHandshake(Handshake):
                     "Connection: Upgrade\r\n" + \
                     "Sec-WebSocket-Accept: " + self.key_accept(self.client_key) + "\r\n"
         if self.protocol:
-            handshake += "Sec-WebSocket-Protocol: " + self.protocol + "\r\n"
+            handshake += "Sec-WebSocket-Protocol: %s\r\n" % self.protocol
         handshake += "\r\n"
         return handshake
 
@@ -418,7 +416,7 @@ class FrameReader(Thread):
                     header, length = struct.unpack("!BB", data)
                     opcode = header & 0xf
                     if not opcode in OPCODES:
-                        raise WebSocketProtocolError("unknown opcode")
+                        raise WebSocketProtocolError("Unknown opcode")
                     if opcode == OPCODE_PING:
                         self.websocket._send_pong()
                         continue
