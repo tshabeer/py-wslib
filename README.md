@@ -14,7 +14,7 @@
         
         def onopen(self, protocol):
             print "open"
-            self.websocket.send('Hello World!')
+            self.send('Hello World!')
         
         def onmessage(self, message):
             print "received message:", message
@@ -43,7 +43,7 @@
     
         def onmessage(self, message):
             print "new message:", message
-            self.websocket.send(message)
+            self.send(message)
     
         def onclose(self):
             print "closed"
