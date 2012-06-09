@@ -105,25 +105,25 @@ class BaseWebSocket(object):
     
     def send(self, message):
         if self.is_open():
-            self._send_raw(TextFrame(message))
+            self._send_raw(Frame(OPCODE_TEXT, data=message, masking=True))
         else:
             raise WebSocketClosedError("Can't send message: connection not open")
     
     def send_binary(self, data):
         if self.is_open():
-            self._send_raw(BinaryFrame(data))
+            self._send_raw(Frame(OPCODE_BINARY, data=data, masking=True))
         else:
             raise WebSocketClosedError("Can't send message: connection not open")
     
     def send_ping(self):
         if self.is_open():
-            self._send_raw(PingFrame())
+            self._send_raw(Frame(OPCODE_PING))
             self._last_ping = time.time()
         else:
             raise WebSocketClosedError("Can't send ping: connection not open")
     
     def _send_pong(self):
-        self._send_raw(PongFrame())
+        self._send_raw(Frame(OPCODE_PONG))
     
     def _ping_timeout(self):
         pass
@@ -131,7 +131,7 @@ class BaseWebSocket(object):
     def close(self):
         if self.is_open():
             self._ready_state = STATE_CLOSING
-            self._send_raw(CloseFrame())
+            self._send_raw(Frame(OPCODE_CLOSE))
         elif self.is_closing():
             self._ready_state = STATE_CLOSED
             self._frame_reader.stop()
@@ -334,7 +334,7 @@ class ServerHandshake(Handshake):
 
 class Frame(object):
     
-    def __init__(self, opcode, data, masking):
+    def __init__(self, opcode, data="", masking=False):
         self.opcode = opcode
         self.data = data
         self.masking = masking
@@ -357,7 +357,7 @@ class Frame(object):
             if self.masking:
                 len_field = 0x80 | len_field
             frame += struct.pack("!BQ", len_field, length)
-        if self.masking:
+        if self.masking and len(self.data) > 0:
             masking_key = array.array("B", os.urandom(4))
             frame += masking_key.tostring()
             data = array.array("B", self.data)
@@ -367,36 +367,6 @@ class Frame(object):
         else:
             frame += self.data
         return frame
-
-
-class TextFrame(Frame):
-    
-    def __init__(self, message, masking=True):
-        Frame.__init__(self, OPCODE_TEXT, message, masking)
-
-
-class BinaryFrame(Frame):
-    
-    def __init__(self, data, masking=True):
-        Frame.__init__(self, OPCODE_BINARY, data, masking)
-
-
-class CloseFrame(Frame):
-    
-    def __init__(self):
-        Frame.__init__(self, OPCODE_CLOSE, '', False)
-
-
-class PingFrame(Frame):
-    
-    def __init__(self):
-        Frame.__init__(self, OPCODE_PING, '', False)
-
-
-class PongFrame(Frame):
-    
-    def __init__(self):
-        Frame.__init__(self, OPCODE_PONG, '', False)
 
 
 class FrameReader(Thread):
