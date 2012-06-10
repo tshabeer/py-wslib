@@ -24,7 +24,6 @@ import struct
 import array
 import select
 import time
-from random import Random
 from threading import Thread
 
 
@@ -35,7 +34,7 @@ urlparse.uses_netloc.append('ws')
 urlparse.uses_netloc.append('wss')
 
 
-WEBSOCKET_VERSION = 13
+WEBSOCKET_VERSION = "13"
 
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 
@@ -143,9 +142,10 @@ class WebSocket(BaseWebSocket):
     
     header_fields = {}
     
-    def __init__(self, url, handler, protocol=None, mask=True):
+    def __init__(self, url, handler, protocols=None, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
         self.url = url
+        self.protocols = protocols
     
     def add_header(self, key, value):
         self.header_fields[key.strip()] = value.strip()
@@ -196,9 +196,11 @@ class WebSocket(BaseWebSocket):
 
 class ServerWebSocket(BaseWebSocket):
     
-    def __init__(self, socket, handler, secure, mask=True):
+    def __init__(self, socket, handler, secure, mask=True,
+                 ignore_version=False):
         BaseWebSocket.__init__(self, handler, mask)
         self._socket = socket
+        self.ignore_version = ignore_version
         try:
             self._read_handshake()
         except WebSocketHandshakeError, err:
@@ -251,6 +253,8 @@ class ServerWebSocket(BaseWebSocket):
         if 'Sec-WebSocket-Version' in self.request_headers:
             if self.request_headers['Sec-WebSocket-Version'] != WEBSOCKET_VERSION:
                 raise WebSocketHandshakeError("Unsupported protocol version")
+        elif not self.ignore_version:
+            raise WebSocketHandshakeError("Protocol version missing")
 
 
 class _Request(object):
@@ -259,14 +263,14 @@ class _Request(object):
         self.query = query
         self.protocols = protocols
         self.headers = headers
-        self.accept = accept
-        self.reject = reject
+        self.accept_callback = accept
+        self.reject_callback = reject
     
     def accept(self, protocol=None):
-        self.accept()
+        self.accept_callback(protocol)
     
     def reject(self):
-        self.reject()
+        self.reject_callback()
 
 
 class Handshake(object):
@@ -309,7 +313,7 @@ class ClientHandshake(Handshake):
         if self.headers:
             for key in self.headers:
                 handshake += "%s: %s\r\n" % (key, self.headers[key].strip())
-        handshake += "\r\n"
+        handshake += "Sec-WebSocket-Version: %s\r\n\r\n" % WEBSOCKET_VERSION
         handshake = handshake.encode('ascii')
         return handshake
 
