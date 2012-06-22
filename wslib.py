@@ -458,7 +458,7 @@ class WebSocketHandler(object):
     
     def onrequest(self, request):
         protocols = list(request.protocols)
-        if protocols > 0:
+        if len(protocols) > 0:
             if protocols[0] in self.sub_protocols:
                 request.accept(protocols[0])
             else:
