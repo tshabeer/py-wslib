@@ -142,24 +142,25 @@ class WebSocket(BaseWebSocket):
     
     header_fields = {}
     
-    def __init__(self, url, handler, protocols=None, mask=True):
+    def __init__(self, url, handler, protocols=None, origin=None, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
         self.url = url
         self.protocols = protocols
+        self.origin = origin
     
     def add_header(self, key, value):
         self.header_fields[key.strip()] = value.strip()
     
     def connect(self):
         self._create_socket()
-        handshake = ClientHandshake(self.url)
+        handshake = ClientHandshake(self.url, self.header_fields, self.protocols, self.origin)
         self._send_raw(handshake)
         self.server_headers = self._read_handshake()
         if self.server_headers['Sec-WebSocket-Accept'] != handshake.key_accept(handshake.nonce):
             self.websocket.close()
             raise WebSocketHandshakeError("Sec-WebSocket-Key does not match with Sec-WebSocket-Accept")
         self._set_open()
-        self.handler.onopen(None)
+        self.handler.onopen(self.server_headers.get('Sec-WebSocket-Protocol', None))
     
     def _read_handshake(self):
         handshake = self.read(4096)
@@ -215,6 +216,7 @@ class ServerWebSocket(BaseWebSocket):
         handshake = ServerHandshake(self.key, protocol)
         self._send_raw(handshake)
         self._set_open()
+        self.handler.onopen(protocol)
     
     def _reject(self, code=404, message="Not Found", headers=None):
         data = "HTTP/1.1 %s %s\r\n" % (code, message)
@@ -241,7 +243,7 @@ class ServerWebSocket(BaseWebSocket):
             raise WebSocketHandshakeError("Missing or unsupported upgrade header")
         self.request_protocols = []
         if 'Sec-WebSocket-Protocol' in self.request_headers:
-            protocol_str = headers['Sec-WebSocket-Protocol']
+            protocol_str = self.request_headers['Sec-WebSocket-Protocol']
             del self.request_headers['Sec-WebSocket-Protocol']
             for protocol in filter(None, protocol_str.split(",")):
                 self.request_protocols.append(protocol.strip())
@@ -269,8 +271,8 @@ class _Request(object):
     def accept(self, protocol=None):
         self.accept_callback(protocol)
     
-    def reject(self):
-        self.reject_callback()
+    def reject(self, *args):
+        self.reject_callback(*args)
 
 
 class Handshake(object):
@@ -286,7 +288,7 @@ class Handshake(object):
 
 class ClientHandshake(Handshake):
     
-    def __init__(self, url, headers={}, protocols={}, extensions={}, origin=None):
+    def __init__(self, url, headers, protocols, origin, extensions={}):
         Handshake.__init__(self, headers, extensions)
         self.protocols = protocols
         url_parts = urlparse.urlparse(url)
@@ -452,9 +454,15 @@ class WebSocketServer(object):
 class WebSocketHandler(object):
     
     websocket = None
+    sub_protocols = []
     
     def onrequest(self, request):
-        request.accept()
+        protocols = list(request.protocols)
+        if protocols > 0:
+            if protocols[0] in self.sub_protocols:
+                request.accept(protocols[0])
+            else:
+                request.reject(406, "Sub-Protocol Not Acceptable")
     
     def onopen(self, protocol):
         pass
