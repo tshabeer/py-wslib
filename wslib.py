@@ -1,6 +1,7 @@
 # -*- coding: utf8 -*-
 """
 Copyright (C) 2012 Roderick Baier
+Copyright (C) 2012 Shabeer Thazhathethil
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,6 +17,7 @@ limitations under the License.
 """
 
 import os
+import ssl
 import socket
 import urlparse
 import hashlib
@@ -54,7 +56,6 @@ OPCODES = [OPCODE_TEXT,
            OPCODE_PING,
            OPCODE_PONG]
 
-
 class WebSocketError(Exception): pass
 
 class WebSocketHandshakeError(Exception): pass
@@ -63,6 +64,34 @@ class WebSocketProtocolError(Exception): pass
 
 class WebSocketClosedError(Exception): pass
 
+class _SSLSocket(object):
+    """Wrapper for a TLS connection."""
+
+    def __init__(self,raw_socket):
+        #self._ssl_socket = ssl.wrap_socket(raw_socket,certfile="cert2/client.pem",keyfile="cert2/client.key")
+        self._ssl_socket = ssl.wrap_socket(raw_socket)
+        #self._ssl_socket.setblocking(True)
+            # Do handshake now (not necessary).
+        #self._ssl_socket.do_handshake()        
+
+    def send(self, data):
+        return self._ssl_socket.write(data)
+
+    def sendall(self, data):
+        return self._ssl_socket.sendall(data)
+
+    def recv(self, size=-1):
+        return self._ssl_socket.read(size)
+
+    def close(self):
+        self._ssl_socket.shutdown()
+        return self._ssl_socket.close()
+
+    def getpeername(self):
+        return self._ssl_socket.getpeername()
+    
+    def setblocking(self,flag):
+        return self._ssl_socket.setblocking(flag)
 
 class BaseWebSocket(object):
     
@@ -96,15 +125,18 @@ class BaseWebSocket(object):
         except:
             raise WebSocketClosedError("Socket closed")
     
-    def read(self, size):
-        return self._socket.recv(size)
-    
-    def _send_raw(self, data):
-        self._socket.sendall(str(data))
-    
+    def read(self, size):       
+            return self._socket.recv(size)
+        
+    def _send_raw(self, data): 
+         try:    
+            self._socket.sendall(str(data))
+         except self._socket.error as e:   
+             raise WebSocketClosedError("Can't send message: connection not open")
+                     
     def send(self, message):
         if self.is_open():
-            self._send_raw(Frame(OPCODE_TEXT, data=message, masking=True))
+            self._send_raw(Frame(OPCODE_TEXT, data=message, masking=True))                             
         else:
             raise WebSocketClosedError("Can't send message: connection not open")
     
@@ -129,11 +161,18 @@ class BaseWebSocket(object):
     
     def close(self):
         if self.is_open():
-            self._ready_state = STATE_CLOSING
-            self._send_raw(Frame(OPCODE_CLOSE))
+            self._ready_state = STATE_CLOSING  
+            try:
+                self._send_raw(Frame(OPCODE_CLOSE))
+            except self._socket.error as e:    
+                self._socket.shutdown()
+                self._socket.close()
+                self.handler.onclose()
+                                 
         elif self.is_closing():
             self._ready_state = STATE_CLOSED
             self._frame_reader.stop()
+            self._socket.shutdown()
             self._socket.close()
             self.handler.onclose()
 
@@ -142,11 +181,14 @@ class WebSocket(BaseWebSocket):
     
     header_fields = {}
     
-    def __init__(self, url, handler, protocols=None, origin=None, mask=True):
+    def __init__(self, url, handler,certfile=None,keyfile=None, protocols=None, origin=None, mask=True):
         BaseWebSocket.__init__(self, handler, mask)
+        #certfile="cert/client.pem",keyfile="cert/client.key"
         self.url = url
         self.protocols = protocols
         self.origin = origin
+        self.certfile=certfile
+        self.keyfile=keyfile
     
     def add_header(self, key, value):
         self.header_fields[key.strip()] = value.strip()
@@ -186,14 +228,25 @@ class WebSocket(BaseWebSocket):
         elif urlparts.scheme == 'wss':
             default_port = 443
             self._secure = True
+            
         else:
             raise WebSocketError("Invalid URL")
         port = urlparts.port
         if not port:
             port = default_port
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.connect((urlparts.hostname, port))
-
+            
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  
+        #sock.settimeout(10)  #new    
+        sock.connect((urlparts.hostname, port))
+        if self._secure is True:
+            self._socket=ssl.wrap_socket(sock,certfile=self.certfile,keyfile=self.keyfile)#_SSLSocket(sock,certfile="cert2/client.pem",keyfile="cert2/client.key")
+        else:
+            self._socket=sock 
+            
+        #sock.connect((urlparts.hostname, port))        
+        #self._socket.connect((urlparts.hostname, port))
+        #self._socket.settimeout(None) #new
+          
 
 class ServerWebSocket(BaseWebSocket):
     
@@ -387,7 +440,7 @@ class FrameReader(Thread):
             try:
                 if self.websocket.ready():
                     data = self.websocket.read(2)
-                    if data == '':
+                    if not data:
                         break
                     header, length = struct.unpack("!BB", data)
                     opcode = header & 0xf
