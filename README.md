@@ -24,6 +24,8 @@
     
     if __name__ == '__main__':
         ws = WebSocket('ws://127.0.0.1:8080/', HelloHandler())
+        #ws = WebSocketClient('wss://127.0.0.1:8080/', HelloHandler(),certfile="cert/client.pem",keyfile="cert/client.key") # For SSL connection
+        #Use without cerfile and keyfile for WSS with trusted certificates.Ex: ws=WebSocketClient('wss://echo.websocket.org',HelloHandler())
         ws.connect()
         time.sleep(5)
         ws.close()
